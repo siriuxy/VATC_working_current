@@ -51,12 +51,26 @@
 #include <linux/netdev_features.h>
 #include <linux/neighbour.h>
 #include <uapi/linux/netdevice.h>
+#include <linux/kernel.h>
+
+extern wait_queue_head_t net_recv_wq;
+extern void vif_bridge(struct sk_buff * skb);
+extern wait_queue_head_t* netbk_wq[6];
+extern wait_queue_head_t* netbk_tx_wq[6];
+
+
 
 struct netpoll_info;
 struct device;
 struct phy_device;
 /* 802.11 specific */
 struct wireless_dev;
+
+
+extern int triggered;
+extern int sentdone;
+extern int recv_triggered;
+
 
 void netdev_set_default_ethtool_ops(struct net_device *dev,
 				    const struct ethtool_ops *ops);
@@ -1452,6 +1466,13 @@ enum netdev_priv_flags {
 
 struct net_device {
 	char			name[IFNAMSIZ];
+
+/*VATC*/
+	int priority;
+	int domid;
+	int tx_flag[6];
+
+	
 	struct hlist_node	name_hlist;
 	char 			*ifalias;
 	/*
@@ -1698,6 +1719,12 @@ struct net_device {
 	int group;
 	struct pm_qos_request	pm_qos_req;
 };
+
+extern struct net_device* NIC_dev;
+extern int BQL_flag;
+extern int DQL_flag;
+
+
 #define to_net_dev(d) container_of(d, struct net_device, dev)
 
 #define	NETDEV_ALIGN		32
@@ -2342,6 +2369,12 @@ struct softnet_data {
 	struct sk_buff_head	input_pkt_queue;
 	struct napi_struct	backlog;
 
+/*VATC*/
+	    u8 localdoms[20][ETH_ALEN];
+	    struct net_device *dev_queue[6];
+	    int dom_index;
+
+
 #ifdef CONFIG_NET_FLOW_LIMIT
 	struct sd_flow_limit __rcu *flow_limit;
 #endif
@@ -2528,6 +2561,8 @@ static inline void netdev_tx_sent_queue(struct netdev_queue *dev_queue,
 
 	set_bit(__QUEUE_STATE_STACK_XOFF, &dev_queue->state);
 
+	BQL_flag=0;
+
 	/*
 	 * The XOFF flag must be set before checking the dql_avail below,
 	 * because in netdev_tx_completed_queue we update the dql_completed
@@ -2536,8 +2571,10 @@ static inline void netdev_tx_sent_queue(struct netdev_queue *dev_queue,
 	smp_mb();
 
 	/* check again in case another CPU has just made room avail */
-	if (unlikely(dql_avail(&dev_queue->dql) >= 0))
+	if (unlikely(dql_avail(&dev_queue->dql) >= 0)) {
 		clear_bit(__QUEUE_STATE_STACK_XOFF, &dev_queue->state);
+		BQL_flag=1;
+	}
 #endif
 }
 
@@ -2574,6 +2611,7 @@ static inline void netdev_tx_completed_queue(struct netdev_queue *dev_queue,
 	if (dql_avail(&dev_queue->dql) < 0)
 		return;
 
+	BQL_flag=1;
 	if (test_and_clear_bit(__QUEUE_STATE_STACK_XOFF, &dev_queue->state))
 		netif_schedule_queue(dev_queue);
 #endif

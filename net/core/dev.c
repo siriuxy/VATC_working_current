@@ -133,8 +133,36 @@
 #include <linux/vmalloc.h>
 #include <linux/if_macvlan.h>
 #include <linux/errqueue.h>
+#include <linux/kthread.h>
+#include <linux/sched.h>
 
 #include "net-sysfs.h"
+
+#define NEW
+
+
+struct net_device *NIC_dev;
+EXPORT_SYMBOL(NIC_dev);
+
+int BQL_flag;
+EXPORT_SYMBOL(BQL_flag);
+int DQL_flag;
+EXPORT_SYMBOL(DQL_flag);
+
+int cleaned;
+EXPORT_SYMBOL_GPL(cleaned);
+
+
+/*RTCA*/
+#define PACKET_SKIPBRIDGE		7      /* this kind of packets can skip the bridge*/
+
+
+wait_queue_head_t* netbk_wq[6];
+EXPORT_SYMBOL(netbk_wq);
+
+wait_queue_head_t* netbk_tx_wq[6];
+EXPORT_SYMBOL(netbk_tx_wq);
+
 
 /* Instead of increasing this, you should create a hash table. */
 #define MAX_GRO_SKBS 8
@@ -2632,6 +2660,7 @@ struct sk_buff *dev_hard_start_xmit(struct sk_buff *first, struct net_device *de
 		}
 
 		skb = next;
+
 		if (netif_xmit_stopped(txq) && skb) {
 			rc = NETDEV_TX_BUSY;
 			break;
@@ -2922,6 +2951,18 @@ static int __dev_queue_xmit(struct sk_buff *skb, void *accel_priv)
 		skb_dst_force(skb);
 
 	txq = netdev_pick_tx(dev, skb, accel_priv);
+
+#ifdef NEW
+	//rcu_read_lock_bh();
+	qdisc_skb_cb(skb)->pkt_len = skb->len;
+	skb=dev_hard_start_xmit(skb,dev,txq,&rc);
+	if((BQL_flag==0 ||DQL_flag==0)&&skb){
+		rcu_read_unlock_bh();
+		return 110;
+	}
+	rcu_read_unlock_bh();
+	return rc;
+#endif
 	q = rcu_dereference_bh(txq->qdisc);
 
 #ifdef CONFIG_NET_CLS_ACT
@@ -3404,6 +3445,13 @@ int netif_rx_ni(struct sk_buff *skb)
 	return err;
 }
 EXPORT_SYMBOL(netif_rx_ni);
+
+/*RTCA*/
+void vif_bridge(struct sk_buff *skb)
+{
+
+}
+EXPORT_SYMBOL(vif_bridge);
 
 static void net_tx_action(struct softirq_action *h)
 {
@@ -4120,11 +4168,67 @@ EXPORT_SYMBOL(gro_find_complete_by_type);
 
 static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 {
-	switch (ret) {
-	case GRO_NORMAL:
-		if (netif_receive_skb_internal(skb))
-			ret = GRO_DROP;
-		break;
+		struct ethhdr *eth_header=(struct ethhdr *)skb_mac_header(skb);
+		struct iphdr * ip_header=(struct iphdr *)((char *)eth_header+sizeof(struct ethhdr));
+		struct udphdr *udp_header=(struct udphdr *)((char *)ip_header+sizeof(struct iphdr));
+		switch (ret) {
+		case GRO_NORMAL:
+			{
+				struct softnet_data *sd;
+				sd=&__get_cpu_var(softnet_data);
+				int i;
+				for(i=0;i<sd->dom_index;i++){
+					if(ether_addr_equal(eth_header->h_dest,sd->localdoms[i]))
+						break;
+				}
+		
+#ifdef NEW
+			unsigned long flags;
+			{
+				if(i<sd->dom_index){
+		
+					if(eth_header->h_proto!=htons(ETH_P_ARP)){
+						rcu_read_lock();
+						net_timestamp_check(netdev_tstamp_prequeue, skb);
+	
+						skb_defer_rx_timestamp(skb);
+						skb_reset_network_header(skb);
+						skb_reset_transport_header(skb);
+						skb_reset_mac_len(skb);
+						
+						skb->dev=sd->dev_queue[i];
+						skb_push(skb, ETH_HLEN);
+
+						dev_queue_xmit(skb);
+						rcu_read_unlock();
+					}
+					else{
+						net_timestamp_check(netdev_tstamp_prequeue, skb);
+	
+						skb_defer_rx_timestamp(skb);
+						__netif_receive_skb(skb);
+					}
+																
+				}
+				else{
+					__netif_receive_skb(skb);
+				}
+				
+				return ret;
+	drop_process:
+				sd->dropped++;			
+	
+				kfree_skb(skb);
+				return GRO_DROP;
+			}
+#endif
+	
+	normal:
+			if (netif_receive_skb(skb))
+				ret = GRO_DROP;
+			}
+			break;
+
 
 	case GRO_DROP:
 		kfree_skb(skb);
@@ -4534,6 +4638,7 @@ static void net_rx_action(struct softirq_action *h)
 		have = netpoll_poll_lock(n);
 
 		weight = n->weight;
+		//weight=256;
 
 		/* This NAPI_STATE_SCHED test is for avoiding a race
 		 * with netpoll's poll_napi().  Only the entity which
@@ -4543,7 +4648,9 @@ static void net_rx_action(struct softirq_action *h)
 		 */
 		work = 0;
 		if (test_bit(NAPI_STATE_SCHED, &n->state)) {
+			//printk("%d %s\n", n->napi_id, n->dev->name);
 			work = n->poll(n, weight);
+			//printk("work=%d\n\n", work);
 			trace_napi_poll(n);
 		}
 
@@ -7312,6 +7419,7 @@ static int __init net_dev_init(void)
 
 		sd->backlog.poll = process_backlog;
 		sd->backlog.weight = weight_p;
+		
 	}
 
 	dev_boot_phase = 0;
