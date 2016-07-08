@@ -5739,6 +5739,9 @@ static void e1000_tx_timeout(struct net_device *netdev)
 
 	/* Do the reset outside of interrupt context */
 	adapter->tx_timeout_count++;
+#ifdef NEW_NETDEV
+	return;
+#endif
 	schedule_work(&adapter->reset_task);
 }
 
