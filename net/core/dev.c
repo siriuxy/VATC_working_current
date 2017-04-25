@@ -4597,8 +4597,9 @@ static int net_recv_kthread(struct napi_struct *napi){
 		// use the generic napi version here
 		// buget used here is the same as e1000's default, 64.
 		napi->poll(napi, 64);
+	}
+ return 0;
 }
-
 
 void netif_napi_add(struct net_device *dev, struct napi_struct *napi,
 		    int (*poll)(struct napi_struct *, int), int weight)
