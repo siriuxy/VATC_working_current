@@ -4620,6 +4620,22 @@ void netif_napi_add(struct net_device *dev, struct napi_struct *napi,
 	napi->poll_owner = -1;
 #endif
 	set_bit(NAPI_STATE_SCHED, &napi->state);
+	if (strncmp(dev->name, "eth", 3)){
+	// VATC indepdendent:
+		BQL_flag = 1;
+		DQL_flag = 1;
+		init_waitqueue_head(&net_recv_wq);
+	// change from e1000 var adapter to generic 
+		net_recv_task = kthread_create(net_recv_kthread, (void *) &napi, "init recv");
+
+		if (IS_ERR(net_recv_task)) 
+		{
+			printk(KERN_ALERT "kthread_create() fails at netdev_init/n");
+		}
+		kthread_bind(net_recv_task,0);
+		wake_up_process(net_recv_task);
+	}
+
 }
 EXPORT_SYMBOL(netif_napi_add);
 

@@ -58,6 +58,10 @@ extern void vif_bridge(struct sk_buff * skb);
 extern wait_queue_head_t* netbk_wq[6];
 extern wait_queue_head_t* netbk_tx_wq[6];
 
+// from VATC:
+// extern wait_queue_head_t net_recv_wq;
+extern struct task_struct *net_recv_task;
+extern int net_recv_flag;
 
 
 struct netpoll_info;
