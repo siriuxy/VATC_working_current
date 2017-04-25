@@ -138,6 +138,10 @@
 
 #include "net-sysfs.h"
 
+#include <linux/wait.h>	
+#include <linux/syscalls.h>
+
+
 #define NEW
 
 
@@ -148,6 +152,13 @@ int BQL_flag;
 EXPORT_SYMBOL(BQL_flag);
 int DQL_flag;
 EXPORT_SYMBOL(DQL_flag);
+
+wait_queue_head_t net_recv_wq;
+EXPORT_SYMBOL(net_recv_wq);
+struct task_struct *net_recv_task;
+EXPORT_SYMBOL(net_recv_task);
+int net_recv_flag;
+EXPORT_SYMBOL(net_recv_flag);
 
 int cleaned;
 EXPORT_SYMBOL_GPL(cleaned);
@@ -4572,6 +4583,22 @@ void napi_hash_del(struct napi_struct *napi)
 	spin_unlock(&napi_hash_lock);
 }
 EXPORT_SYMBOL_GPL(napi_hash_del);
+
+// adpoted from Chong's drivers/net/ethernet/intel/e1000e/netdev.c
+static int net_recv_kthread(struct napi_struct *napi){
+	struct sched_param net_recv_param={.sched_priority=97};
+	sched_setscheduler(net_recv_task,SCHED_FIFO,&net_recv_param);
+	while (!kthread_should_stop()) {
+		wait_event_interruptible(net_recv_wq, 
+			net_recv_flag||kthread_should_stop());
+		cond_resched();
+		if (kthread_should_stop())
+			break;
+		// use the generic napi version here
+		// buget used here is the same as e1000's default, 64.
+		napi->poll(napi, 64);
+}
+
 
 void netif_napi_add(struct net_device *dev, struct napi_struct *napi,
 		    int (*poll)(struct napi_struct *, int), int weight)
