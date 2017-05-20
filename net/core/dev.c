@@ -138,12 +138,23 @@
 
 #include "net-sysfs.h"
 
+#include <linux/wait.h>	
+#include <linux/sched.h>
+#include <linux/kthread.h>
+#include <linux/syscalls.h>
+#include <linux/kernel.h>
+
 #define NEW
 
 
 struct net_device *NIC_dev;
 EXPORT_SYMBOL(NIC_dev);
 
+// redundant, as they are decared in netdevice.h
+// which is #included
+
+//extern int BQL_flag;
+//extern int DQL_flag;
 int BQL_flag;
 EXPORT_SYMBOL(BQL_flag);
 int DQL_flag;
@@ -4476,6 +4487,31 @@ static int process_backlog(struct napi_struct *napi, int quota)
 	return work;
 }
 
+
+wait_queue_head_t net_recv_wq;
+EXPORT_SYMBOL(net_recv_wq);
+struct task_struct *net_recv_task;
+EXPORT_SYMBOL(net_recv_task);
+int net_recv_flag;
+EXPORT_SYMBOL(net_recv_flag);
+
+
+// adpoted from Chong's drivers/net/ethernet/intel/e1000e/netdev.c
+// see https://github.com/siriuxy/VATC-3.18/commit/31a5d7a91db9cee95fc30713edc0d55b720f2119
+static int net_recv_kthread(struct napi_struct *napi){
+	struct sched_param net_recv_param={.sched_priority=97};
+	sched_setscheduler(net_recv_task,SCHED_FIFO,&net_recv_param);
+	while (!kthread_should_stop()) {
+		wait_event_interruptible(net_recv_wq, 
+			net_recv_flag||kthread_should_stop());
+		cond_resched();
+		if (kthread_should_stop())
+			break;
+		// use the generic napi version here
+		// buget used here is the same as e1000's default, 64.
+		napi->poll(napi, 64);
+}
+
 /**
  * __napi_schedule - schedule for receive
  * @n: entry to schedule
@@ -4484,6 +4520,19 @@ static int process_backlog(struct napi_struct *napi, int quota)
  */
 void __napi_schedule(struct napi_struct *n)
 {
+	// if (true){
+	// 	// strncmp(n->dev->name, "eth", 3)){
+	// 	/* these will be conducted in net_recv_kthread by 
+	// 		dev->poll
+	// 	n->total_tx_bytes = 0;
+	// 	n->total_tx_packets = 0;
+	// 	n->total_rx_bytes = 0;
+	// 	n->total_rx_packets = 0;
+	// 	*/
+	// 	// change flags and call on net_recv_kthread
+	// 	net_recv_flag = 1;
+	// 	wake_up(&net_recv_wq);
+	// } 
 	unsigned long flags;
 
 	local_irq_save(flags);
@@ -4576,6 +4625,8 @@ EXPORT_SYMBOL_GPL(napi_hash_del);
 void netif_napi_add(struct net_device *dev, struct napi_struct *napi,
 		    int (*poll)(struct napi_struct *, int), int weight)
 {
+	// TODO: kthread create here! Reason: all network device
+	// initialization will CALL this function.
 	INIT_LIST_HEAD(&napi->poll_list);
 	napi->gro_count = 0;
 	napi->gro_list = NULL;
@@ -4592,6 +4643,25 @@ void netif_napi_add(struct net_device *dev, struct napi_struct *napi,
 	napi->poll_owner = -1;
 #endif
 	set_bit(NAPI_STATE_SCHED, &napi->state);
+
+	// ADDED 4/17	
+	// if the device is used for expected purpose:
+	if (strncmp(dev->name, "eth", 3)){
+	// VATC indepdendent:
+		BQL_flag = 1;
+		DQL_flag = 1;
+		init_waitqueue_head(&net_recv_wq);
+	// change from e1000 var adapter to generic 
+		net_recv_task = kthread_create(net_recv_kthread, (void *) &napi, "init recv");
+
+		if (IS_ERR(net_recv_task)) 
+		{
+			printk(KERN_ALERT "kthread_create() fails at netdev_init/n");
+		}
+		kthread_bind(net_recv_task,0);
+		wake_up_process(net_recv_task);
+	}
+
 }
 EXPORT_SYMBOL(netif_napi_add);
 
@@ -6382,6 +6452,7 @@ int register_netdevice(struct net_device *dev)
 	if (!dev->rtnl_link_ops ||
 	    dev->rtnl_link_state == RTNL_LINK_INITIALIZED)
 		rtmsg_ifinfo(RTM_NEWLINK, dev, ~0U, GFP_KERNEL);
+}
 
 out:
 	return ret;
@@ -6454,6 +6525,8 @@ int register_netdev(struct net_device *dev)
 	rtnl_lock();
 	err = register_netdevice(dev);
 	rtnl_unlock();
+
+
 	return err;
 }
 EXPORT_SYMBOL(register_netdev);
@@ -7166,6 +7239,10 @@ static int __net_init netdev_init(struct net *net)
 	if (net->dev_index_head == NULL)
 		goto err_idx;
 
+	// I'm moving the stuff to register_netdev in this file.
+	// this appears to be a new feature of linux for containers
+	// http://www.makelinux.net/ldd3/chp-17-sect-3
+	// http://blogs.igalia.com/dpino/2016/04/10/network-namespaces/
 	return 0;
 
 err_idx:

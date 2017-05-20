@@ -53,10 +53,14 @@
 #include <uapi/linux/netdevice.h>
 #include <linux/kernel.h>
 
-extern wait_queue_head_t net_recv_wq;
+// extern wait_queue_head_t net_recv_wq;
 extern void vif_bridge(struct sk_buff * skb);
 extern wait_queue_head_t* netbk_wq[6];
 extern wait_queue_head_t* netbk_tx_wq[6];
+
+extern wait_queue_head_t net_recv_wq;
+extern struct task_struct *net_recv_task;
+extern int net_recv_flag;
 
 
 
@@ -400,6 +404,7 @@ typedef enum rx_handler_result rx_handler_result_t;
 typedef rx_handler_result_t rx_handler_func_t(struct sk_buff **pskb);
 
 void __napi_schedule(struct napi_struct *n);
+
 
 static inline bool napi_disable_pending(struct napi_struct *n)
 {
@@ -1723,7 +1728,6 @@ struct net_device {
 extern struct net_device* NIC_dev;
 extern int BQL_flag;
 extern int DQL_flag;
-
 
 #define to_net_dev(d) container_of(d, struct net_device, dev)
 
